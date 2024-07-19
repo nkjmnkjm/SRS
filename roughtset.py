@@ -1,498 +1,476 @@
 import numpy as np
-from collections import defaultdict
+import warnings
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn import preprocessing
+from itertools import combinations
+# from sklearn.metrics.cluster import mutual_info_score
+# -*-coding:utf-8-*-
+DEBUG = False
 
-from copy import deepcopy
-import numpy as np
-import pandas as pd
-import xlrd
-from pprint import pprint
-from itertools import combinations, permutations
-import random
 
-class roughset():
+def check_df(df, name_col, feature_col, decision_col):
+    """
+    检查df是否符合要求
+    df: pandas.DataFrame
+    name_col: str, 样本名称, 必须存在df.columns 且 所有name_col的值都不重复
+    feature_col: list, 条件属性, 存在df.columns
+    decision_col: str, 决策属性, 存在df.columns
+    """
+    columns = df.columns
+    if DEBUG:
+        print(
+            f"name_col: {name_col}\n",
+            f"feature_col: {feature_col}\n",
+            f"decision_col: {decision_col}\n"
+        )
+    # %% 检查
+    # name_col 存在于 columns
+    assert name_col in columns, f'{name_col} not in {columns}'
+    # 所有name_col的值都不重复
+    assert len(df[name_col].unique()) == len(df[name_col]), f'{name_col} has duplicate values'
+    # feature_col 存在于 columns
+    assert all([col in columns for col in feature_col]), f'{feature_col} not in {columns}'
+    # decision_col 存在于 columns
+    assert decision_col in columns, f'{decision_col} not in {columns}'
 
-    def __init__(self,train_data,train_target):
-        self.train = train_data
-        self.target = train_target
 
-    def basic_set(self,df):
-        basic = {}
-        for i in df.drop_duplicates().values.tolist():
-            basic[str(i)] = []
-            for j, k in enumerate(df.values.tolist()):
-                if k == i:
-                    basic[str(i)].append(j)
-        return basic
+# %% 建立decision dictionary
+def create_decision_dict(df, name_col, decision_col):
+    """
+    建立decision dictionary
+    df: pandas.DataFrame
+    name_col: str, 样本属性
+    decision_col: str, 决策属性
 
-    def divide(self):
-        matrix = pd.concat([self.train,self.target],axis=1).values
-        len_attribute = len(matrix[0]) - 1
-        matrix_delete = []
-        # 决策表分解
-        mistake = []
-        a = len(matrix)
-        for j in range(len(matrix)):
-            for k in range(j, len(matrix)):
-                if ((matrix[j][0:len_attribute] == matrix[k][0:len_attribute]).all() and matrix[j][len_attribute] !=matrix[k][len_attribute]):
-                    matrix_delete.append(list(matrix[k]))
-                    mistake.append(k)
-        if mistake!=[]:
-            matrix = np.delete(matrix, mistake, axis=0)
-        # if (len(matrix_delete)):
-        #     print('矛盾:', matrix_delete)
-        # else:
-        #     print('不存在矛盾数据！')
-        #     print('-------------------------------------------')
-        # if (len(matrix)):
-        #     print('完全一致表:')
-        #     pprint(matrix)
-        # else:
-        #     print('不存在完全一致表:')
-        #
-        # if (len(matrix_delete)):
-        #     print('完全不一致表:')
-        #     print(matrix_delete)
-        self.matrix = matrix
+    return: dict, key是decision_values, values是df中decision_col属性为key的name_col属性的值
+        例： {0: {1, 2}, 1: {3, 4, 5}}
+    """
+    decision_values = df[decision_col].unique()
+    # 建立一個set，key是decision_values, values是是df中decision_col属性为key的name_col属性的值
+    decision_dict = {key: set(df[df[decision_col] == key][name_col]) for key in decision_values}
+    return decision_dict
 
-    def yilaidu_fun(self,k):
-        excel_temp = list(combinations(self.excel, k))  # 排列组合数
-        title_temp = list(combinations(self.title, k))
-        for i in range(len(title_temp)):
-            excel_temp[i] = list(excel_temp[i])
-            title_temp[i] = list(title_temp[i])
-        # print('title_temp:',title_temp)
-        # print(excel_temp)
-        a = []
-        b = []
-        c = []
-        for i in range(len(excel_temp)):
-            temp = self.intersection(excel_temp[i])
-            # print(temp)
-            # print(title_temp[i], end=' ')
-            # print('依赖度:', self.dependence_degree(temp))
-            # if (self.dependence_degree(temp) == 1):
-            #     a.append(set(title_temp[i]))
-            # else:
-            #     b.append(set(title_temp[i]))
-            #     c.append(self.dependence_degree(temp))
-            a.append(set(title_temp[i]))
-            b.append(self.dependence_degree(temp))
-        # print(a)
-        return a,b
 
-    def dependence_degree(self,x_list):
-        count = 0
-        for i in x_list:
-            for j in self.ybasic_list:
-                if (set(i) <= set(j)):
-                    count = count + len(i)
-        degree = round(count / len(self.train), 4)
-        return degree
+# %% 建立reduct dictionary
+def create_reduct_dict_by_row(df, row, name_col, feature_col):
+    """
+    建立reduct dictionary
+    df: pandas.DataFrame
+    row: pandas.Series, 要比对的样本
+    name_col: str, 样本名称
+    feature_col: list, 条件属性
+    decision_col: str, 决策属性
 
-    def intersection_2(self,someone_excel):
-        x_list = someone_excel[0]
-        y_list = someone_excel[1]
-        # print(x_list)
-        # print(y_list)
-        x_set = [[]] * len(x_list)
-        for i in range(len(x_list)):
-            x_set[i] = set(x_list[i])
+    return: dict, key是features, values是df中decision_col是key的name_col的值
+        例： {(1,): {1, 2}, (1, 2): {1, 2, 3}}
+    """
+    reduct_dict = {}
+    for num_features in range(1, len(feature_col)):
+        for features in combinations(feature_col, num_features):
+            df_selected = df  # 取出一份df
+            for feature in features:
+                value = row[feature]
+                df_selected = df_selected[df_selected[feature] == value]  # 依序过滤
+            reduct_dict[features] = set(df_selected[name_col])  # 将过滤后的df的name_col的值存入reduct_dict
+    return reduct_dict
 
-        y_set = [[]] * len(y_list)
-        for i in range(len(y_list)):
-            y_set[i] = set(y_list[i])
 
-        a = []
-        for i in range(len(x_list)):
-            for j in range(len(y_list)):
-                if (x_set[i] & y_set[j]):
-                    a.append(x_set[i] & y_set[j])
-        return a
+# %% 过滤reduct dictionary
+def filter_reduct_dict_by_row(row, name_col, decision_dict, reduct_dict):
+    """
+    过滤reduct dictionary
+    Args:
+        row: pandas.Series, 要比对的样本
+        name_col: str, 样本属性
+        decision_dict: dict, key是decision_values, values是是df中decision_col属性为key的name_col属性的值
+            例：{0: {1, 2}, 1: {3, 4, 5}}
+        reduct_dict: dict, key是features, values是是df中decision_col属性为key的name_col属性的值
+            例：{('天氣',): {2, 3, 5},
+                ('事故情形',): {2},
+                ('事故原因',): {2, 5},
+                ('天氣', '事故情形'): {2},
+                ('天氣', '事故原因'): {2, 5},
+                ('事故情形', '事故原因'): {2}}
+    Return:
+        reduct_result: list, reduct rules
+            例：[('事故情形',), ('天氣', '事故情形'), ('事故情形', '事故原因')]
+    """
+    # 取得decision_dict中value有包含row[name_col]的value
+    # 例： {1, 2}
+    decision = [value for key, value in decision_dict.items() if row[name_col] in value][0]
 
-    def intersection(self,excel_temp):
-        if (len(excel_temp) > 1):
-            a = self.intersection_2([excel_temp[0], excel_temp[1]])
-            for k in range(2, len(excel_temp)):
-                a = self.intersection([a, excel_temp[k]])
+    # %%
+    # 對所有的reduct_dict的value
+    # 分別去計算是否为decision的子集
+    # 加入所有的decision的子集到reduct_dict_final
+    reduct_result = []
+    for key, value in reduct_dict.items():
+        if DEBUG:
+            print(key, value, value.issubset(decision))
+        if value.issubset(decision):
+            reduct_result.append(key)
+    return reduct_result
+
+
+# %% 建立reduct rules dataframe
+def create_reduct_rules_by_row(df, row, columns, name_col, decision_col, reduct_result, include_empty=False):
+    # 针对結果，建立新的dataframe
+    df_rule = pd.DataFrame(columns=columns)
+    # 先建立一个empty的row
+    empty_row = pd.Series([None] * len(columns), index=columns)
+
+    for rule in reduct_result:
+
+        new_row = empty_row.copy()
+        for feature in rule:
+            new_row[feature] = row[feature]
+        new_row[name_col] = row[name_col]
+        new_row[decision_col] = row[decision_col]
+
+        df_rule = pd.concat([df_rule, new_row.to_frame().T], ignore_index=True)
+
+    # 若df_rule是空的，则仍然加入一个row
+    if df_rule.empty and include_empty:
+        new_row = empty_row.copy()
+        new_row[name_col] = row[name_col]
+        df_rule = pd.concat([df_rule, new_row.to_frame().T], ignore_index=True)
+
+    return df_rule
+
+
+# %% 建立流程
+def create_reduct_rules(df, name_col, feature_col, decision_col, include_empty=False):
+    """
+    建立流程
+    """
+    # 检查columns
+    check_df(df, name_col, feature_col, decision_col)
+    columns = [name_col] + feature_col + [decision_col]
+
+    # 建立决策目标的值的集合
+    decision_dict = create_decision_dict(df, name_col, decision_col)
+
+    df_rule = pd.DataFrame(columns=columns)
+    # 依照每一个row进行
+    for index, row in df.iterrows():
+        reduct_dict = create_reduct_dict_by_row(df, row, name_col, feature_col)  # 建立这个row的不同数量特征产生的约简集合
+        reduct_result = filter_reduct_dict_by_row(row, name_col, decision_dict, reduct_dict)  # 过滤约简集合，只留下决策目标的子集合
+        row_rules = create_reduct_rules_by_row(df, row, columns, name_col, decision_col, reduct_result,
+                                               include_empty)  # 建立reduct rules dataframe
+        df_rule = pd.concat([df_rule, row_rules], ignore_index=True)
+    return df_rule
+class cosRoughSet:
+    def __init__(self, data, feature_col=None, decision_col=None):
+        self.df = data
+        self.feature_col = feature_col or list(data.columns[0:-1])
+        self.decision_col = decision_col or data.columns[-1]
+        self.check_roughset_prerequisites()
+        self.featuredf = self.df[self.feature_col]
+        self.decisiondf = self.df[self.decision_col]
+
+    def check_roughset_prerequisites(self):
+        columns = self.df.columns
+        feature_col = self.feature_col
+        decision_col = self.decision_col
+
+        assert all([col in columns for col in feature_col]), f'{feature_col} not in {columns}'
+        assert all([col in columns for col in decision_col]), f'决策属性不存在：{decision_col} not in {columns}'
+
+    def divdf(self,df,collist):
+        divlist = []
+        for a, b in df.groupby(collist):
+            divlist.append(b.index.tolist())
+        divlist = sorted(divlist, key=len, reverse=True)
+        ans =[]
+        for j in divlist:
+            ans.append(set(j))
+        return ans
+    def getpos(self,collist,dellist):
+        pos = []
+        for i in collist:
+            for j in dellist:
+                if i.issubset(j):
+                    pos.append(i)
+                    continue
+        return pos
+    def getcos(self,collist,dellist):
+        colvec = [len(i) for i in collist]
+        delvec = [len(i) for i in dellist]
+        while len(colvec)<len(delvec):
+            colvec.append(0)
+        while len(colvec)>len(delvec):
+            delvec.append(0)
+        def cos_similarity(x, y):
+            cos = np.dot(x, y) / (np.linalg.norm(x) * np.linalg.norm(y))
+            return cos
+        return cos_similarity(colvec,delvec)
+
+    def getimport(self,poslist,dellist):
+        return sum([len(i) for i in poslist])/sum([len(i) for i in dellist])
+
+    def getSGF(self,collist,dellist):
+        IC=0
+        U = sum([len(i) for i in collist])
+        for i in collist:
+            ICD=0
+            for j in dellist:
+                a = set(i)
+                b = set(j)
+                c = len(list(a & b))/len(i)
+                ICD += c*np.log2(c)
+            IC-=len(i)*ICD/U
+        return IC
+
+    def getICD(self,collist,dellist):
+        IC=0
+        U = sum([len(i) for i in collist])
+        for i in collist:
+            ICD=0
+            for j in dellist:
+                a = set(i)
+                b = set(j)
+                c = len(list(a & b))/len(i)
+                if c!=0:
+                    ICD += c*np.log2(c)
+            IC-=len(i)*ICD/U
+        IRD =0
+        for i in collist:
+            IRD-= len(i)*np.log2(len(i)/U)/U
+        return IRD-IC
+
+    def getmutualinfor(self,poslist,dellist):
+        return
+
+    def getcore(self,usedf,featurename=None,decname=None,divlist=None):
+        df = usedf
+        featurename = featurename or self.df
+        if divlist==None:
+            decname = decname or self.decision_col
+            decdf = df[decname]
+            declist = self.divdf(decdf,decname)
         else:
-            a = excel_temp[0]
-        return a
-
-    def deal(self):
-        self.excel=[]
-        self.title = self.train.columns.values.tolist()
-        self.divide()
-        matrix_T = self.matrix.T
-        for i in range(self.train.shape[1]):
-            a = self.train.loc[:,self.title[i]]
-            basicset= self.basic_set(self.train.loc[:,self.title[i]])
-            basiclist = sorted([v for k,v in basicset.items()])
-            self.excel.append(basiclist)
-        self.ybasic_list = sorted([v for k,v in self.basic_set(self.target).items()])
-        yilaidu = []
-        ratelist = []
-        for i in range(1, self.train.shape[1] + 1):
-            # a,b,c = self.yilaidu_fun(i)
-            # yilaidu.extend(a)
-            # for j in b:
-            #     yuejian.append(j)
-            # for p in c:
-            #     yilaidu1.append(p)
-            a,b = self.yilaidu_fun(i)
-            yilaidu.extend(a)
-            ratelist.extend(b)
-        #print('依赖度为1的属性有:', yilaidu)
-        # print(yilaidu)
-        numlist = [i for i, j in enumerate(ratelist) if j == max(ratelist)]
-        for i in numlist:
-            for j in numlist:
-                if (yilaidu[i]>yilaidu[j]):
-                    yilaidu[i]=yilaidu[j]
-                    num = j
-        if len(numlist)==1:
-            num = numlist[0]
-        for i in range(len(yilaidu)):
-            if i not in numlist:
-                yilaidu[i] = yilaidu[num]
-        # 约简
-        # i = 0
-        # j = 0
-        # k = len(yilaidu)  # k=6
-        # for i in range(k):
-        #     for j in range(k):
-        #         if (yilaidu[i] > yilaidu[j]):  # i更大，应该删除i
-        #             yilaidu[i] = yilaidu[j]
-
-        # 去重
-        yilaidu_new = []
-        for i in yilaidu:
-            if i not in yilaidu_new:
-                yilaidu_new.append(i)
-        for i in range(len(yilaidu_new)):
-            yilaidu_new[i] = sorted(list(yilaidu_new[i]))
-        result = yilaidu_new
-
-        # 各约简属性的属性值
-        matrix_new = []
-        for i in range(len(result)):
-            matrix_new.append([])
-        for i in range(len(result)):
-            for j in range(len(result[i])):
-                for k in range(len(self.title)):
-                    if (result[i][j] == self.title[k]):
-                        matrix_new[i].append(list(matrix_T[k]))
-        print(result)
-        # for i in range(len(matrix_new)):
-        #     print('------------------------------------')
-        #     print('序号 ', end='')
-        #     for j in range(len(result[i])):
-        #         print(result[i][j], '', end='')
-        #     print('归类')
-        #     for j in range(len(matrix_new[0][0])):
-        #         print(j + 1, end='    ')
-        #         for k in range(len(result[i])):
-        #             print(matrix_new[i][k][j], end='  ')
-        #         print(' ', self.matrix[j][len(self.matrix[0]) - 1])
-        # if (result == []):
-        #     print(self.matrix)
-        return result
-
-    def deal1(self):
-        self.divide()
-        self.title = self.train.columns.values.tolist()
-        matrix = self.matrix
-        matrix_T = matrix.T
-        number_sample = len(matrix)  # 样本数量
-        number_attribute = len(matrix_T) - 1  # 属性数量
-        # 二维列表的创建：
-        excel = [[[] for col in range(number_sample)] for row in range(number_sample)]
-        pprint(matrix)
-        # 比较各样本哪些属性的值不同（只对决策属性不同的个体进行比较）
-        for k in range(len(self.title)):  # 属性
-            for i in range(number_sample):  # 第几个样本
-                for j in range(i, number_sample):
-                    if (matrix[i][k] != matrix[j][k] and matrix[i][number_attribute] != matrix[j][number_attribute]):
-                        excel[i][j].append(self.title[k])
-        for i in range(number_sample):
-            for j in range(i, number_sample):
-                excel[j][i] = set(excel[i][j])
-                excel[i][j] = {}
-        # pprint(excel)#excel
-        yuejian = []
-        for i in range(number_sample):
-            for j in range(number_sample):
-                if (excel[i][j] and excel[i][j] not in yuejian):
-                    yuejian.append(excel[i][j])
-        print('约简')
-        print(yuejian)
-        # 约简
-        i = 0
-        j = 0
-        k = len(yuejian)  # k=6
-        for i in range(k):
-            for j in range(k):
-                if (yuejian[i] > yuejian[j]):  # i更大，应该删除i
-                    yuejian[i] = yuejian[j]
-                if (yuejian[i] & yuejian[j]):
-                    yuejian[i] = yuejian[i] & yuejian[j]
-                    yuejian[j] = yuejian[i] & yuejian[j]
-        '''
-        #print(yuejian)
-        #去重
-        yuejian_new = []
-        for id in yuejian:
-            if id not in yuejian_new:
-                yuejian_new.append(id)
-        yuejian = yuejian_new
-        '''
-        # print('约简为:',yuejian)
-        # print('yuejian:',yuejian)
-        # 类似于笛卡儿积
-        flag = 0
-        result = []
-        for i in yuejian:
-            if (len(i) > 1):
-                flag = 1
-        if (flag == 1):  # 将集合分解开，逐个取其与其他集合的并集
-            simple = yuejian[0]
-            nosimple = deepcopy(yuejian)
-            i = 0
-            while (i < len(nosimple)):
-                if (len(nosimple[i]) == 1):
-                    simple = simple | nosimple[i]
-                    nosimple.pop(i)
+            declist=divlist
+        zero_matrix= []
+        tmpans = []
+        df = df[featurename]
+        for i in range(len(df.index.tolist())):
+            row=[]
+            for a in declist:
+                if i in a:
+                    flag = a
+            for j in range(i,len(df.index.tolist())):
+                if j not in flag:
+                    row1 = df.iloc[i].tolist()
+                    row2 = df.iloc[j].tolist()
+                    diff=[]
+                    for k in range(len(row1)):
+                        if row1[k]!=row2[k]:
+                            diff.append(k)
+                    diffstr = ''
+                    for n in diff:
+                        diffstr+=str(n)
+                    row.append(diffstr)
+                    if len(diffstr)==1 and int(diffstr) not in tmpans:
+                        tmpans.append(int(diffstr))
                 else:
-                    i = i + 1
-            for i in range(len(nosimple)):
-                nosimple[i] = list(nosimple[i])
-            simple = list(simple)
+                    row.append(str(0))
+            zero_matrix.append(row)
+        return [df.columns.tolist()[index] for index in tmpans]
 
-            for i in range(len(nosimple)):
-                for j in range(len(nosimple[i])):
-                    simple_temp = deepcopy(simple)
-                    simple_temp.append(nosimple[i][j])
-                    result.append(simple_temp)
+    def cosfs(self,df,featurecol = None,deccol = None):
+        df = df
+        featurecol = featurecol or self.feature_col
+        decisioncol = deccol or self.decision_col
+        divlist = self.divdf(df[decisioncol],decisioncol)
+        newfeature = self.getcore(df,featurecol,divlist=divlist)
+        tempfeature = list(set(featurecol)-set(newfeature))
+        if len(newfeature)==0:
+            covnum=0
+            cosnum=0
         else:
-            simple = yuejian[0]
-            for i in yuejian:
-                simple = simple | i  # 如果只有单元素，则将取其与其他集合的并集
-            result.append(list(simple))
-        print('jieguo')
-        print(result)
-        # 约简矩阵的各属性的样本值
-        matrix_new = []
-        for i in range(len(result)):
-            matrix_new.append([])
-        for i in range(len(result)):
-            for j in range(len(result[i])):
-                for k in range(len(self.title)):
-                    if (result[i][j] == self.title[k]):
-                        matrix_new[i].append(list(matrix_T[k]))
-        # 输出
-        for i in range(len(matrix_new)):
-            print('------------------------------------')
-            print('序号 ', end='')
-            for j in range(len(result[i])):
-                print(result[i][j], '', end='')
-            print('归类：')
-            for j in range(len(matrix_new[0][0])):
-                for k in range(len(result[i])):
-                    print(matrix_new[i][k][j], end='   ')
-                print(' ', matrix[j][number_attribute])
-
-
-
-class roughchange:
-
-    def __init__(self, train_data, train_target, rulist, delta):
-        """
-        初始化对象参数
-        :param train_data: 训练集数据
-        :param train_target: 训练集标签
-        :param rulist: 已有规则
-        :param delta: δ邻域的值，
-        """
-        self.train_data = train_data
-        self.train_target = train_target
-        self.delta = delta
-        self.rulist  =rulist
-        pass
-
-    def compute_corr(self, i, j, tmp_train_data):
-        """
-        计算相关性
-        :param i: 循环第i次
-        :param j: 当前特征
-        :param tmp_train_data: 临时数据
-        :return:
-        """
-        if i == 0:
-            tmp_train_data = self.train_data[:, j]
-        # 每一轮更新一个临时数据集，用以测试不同特征下的依赖度的不同
-        else:
-            tmp_train_data = np.insert(tmp_train_data, tmp_train_data.shape[1], self.train_data[:, j], axis=1)
-
-        # 计算样本的δ邻域
-        delta_neighbor_dict = dict()
-        for k in range(self.train_data.shape[0]):
-            delta_neighbor_list = list()
-            for v in range(self.train_data.shape[0]):
-                dis = np.sqrt(np.sum((tmp_train_data[k] - tmp_train_data[v]) ** 2))
-                if dis <= self.delta:
-                    delta_neighbor_list.append(v)
-            delta_neighbor_dict.update({k: delta_neighbor_list})
-
-        # 对每个样本判断是否在δ邻域内，是的话更新邻域样本的列表
-        sample_list = list()
-        for k in range(self.train_data.shape[0]):
-            count_issubset = 0
-            count = 0
-            for v in range(self.train_target.shape[1]):
-                if self.train_target[k, v] == 1:
-                    count += 1
-                    # 每个标签下不同类别及其对应样本索引
-                    target_equivalence_class = defaultdict(list)
-                    for m, n in [(n, m) for m, n in list(enumerate(self.train_target[:, v]))]:
-                        target_equivalence_class[m].append(n)
-                    # 前者是否是后者子集
-                    if set(delta_neighbor_dict.get(k)).issubset(target_equivalence_class.get(1)):
-                        count_issubset += 1
+            tempdiv = self.divdf(df,newfeature)
+            temppos= self.getpos(tempdiv,divlist)
+            cosnum = self.getcos(tempdiv, divlist)
+            covnum = self.getimport(temppos,divlist)
+        while covnum!=1.0:
+            flag=0
+            tempf = -1
+            tempdata=[]
+            tempcov=0
+            for i in tempfeature:
+                select_feature = newfeature.copy()
+                select_feature.append(i)
+                newdiv = self.divdf(df,select_feature)
+                newcos = self.getcos(newdiv,divlist)
+                newpos = self.getpos(newdiv,divlist)
+                newcov = self.getimport(newpos,divlist)
+                if newcos>cosnum and newcov>covnum:
+                    tempf = i
+                    cosnum = newcos
+                    tempcov = newcov
+                elif newcos==cosnum:
+                    if tempcov!=0:
+                        if newcov>tempcov:
+                            tempf = i
+                            cosnum = newcos
+                            tempcov = newcov
                     else:
-                        break
-            if count_issubset == count:
-                sample_list.append(k)
-
-        # 计算当前特征下的属性依赖度
-        corr = len(sample_list) / self.train_data.shape[0]
-        return corr
-
-    def rulereduction(self):
-        """
-            1、一阶段，计算当前特征子集与候选特征子集中任意一个特征后的属性依赖度
-            2、属性依赖度的计算，依赖于满足邻域近似条件的样本数目
-            3、邻域近似条件指的是当样本的δ邻域内的样本属于样本分类标记中的任意一个标记下的等价类内，该样本满足邻域条件
-            4、样本的δ邻域计算是样本与任意个样本进行计算，获取距离，小于δ则加入邻域，
-            5、标签等价类是指样本被标记的正类
-        :return:
-        """
-        min_max_scaler = preprocessing.MinMaxScaler()
-        x_minmax = min_max_scaler.fit_transform(self.train_data)
-        self.train_data = x_minmax
-        feature_num = self.train_data.shape[1]
-        feature_list_all = []
-        corr_first = 0
-        old_feature = list(self.train_data)
-        print("初始依赖度为0")
-        for rulist1 in self.rulist:
-            feature_list = []
-            for i in range(feature_num):
-                tmp_train_data = self.train_data[:, feature_list]
-                max_corr = 0
-                max_index = 0
-                for j in range(rulist1):
-                    if j in feature_list:
-                        continue
-                    j = old_feature.index(rulist1[j])
-                    corr = self.compute_corr(i, j, tmp_train_data)
-                    print("当前特征数：", len(feature_list), "当前特征：", j, "当前corr：", corr, "最大corr：", corr_first)
-                    if max_corr < corr:
-                        max_corr = corr
-                        max_index = j
-
-                if corr_first < max_corr:
-                    corr_first = max_corr
-                    feature_list.append(int(max_index))
+                        if newcov>covnum:
+                            tempf = i
+                            cosnum = newcos
+                            tempcov = newcov
                 else:
-                    continue
-            feature_list_all.append(feature_list)
-        return feature_list_all
-
-    def rulefind(self):
-        """
-              1、一阶段，计算当前特征子集与候选特征子集中任意一个特征后的属性依赖度
-              2、属性依赖度的计算，依赖于满足邻域近似条件的样本数目
-              3、邻域近似条件指的是当样本的δ邻域内的样本属于样本分类标记中的任意一个标记下的等价类内，该样本满足邻域条件
-              4、样本的δ邻域计算是样本与任意个样本进行计算，获取距离，小于δ则加入邻域，
-              5、标签等价类是指样本被标记的正类
-          :return:
-          """
-        min_max_scaler = preprocessing.MinMaxScaler()
-        x_minmax = min_max_scaler.fit_transform(self.train_data)
-        self.train_data = x_minmax
-        feature_num = self.train_data.shape[1]
-        feature_list = list()
-        corr_first = 0
-        print("初始依赖度为0")
-
-        for i in range(feature_num):
-            tmp_train_data = self.train_data[:, feature_list]
-            max_corr = 0
-            max_index = 0
-            for j in range(self.train_data.shape[1]):
-                if j in feature_list:
-                    continue
-                corr = self.compute_corr(i, j, tmp_train_data)
-                print("当前特征数：", len(feature_list), "当前特征：", j, "当前corr：", corr, "最大corr：", corr_first)
-                if max_corr < corr:
-                    max_corr = corr
-                    max_index = j
-
-            if corr_first < max_corr:
-                corr_first = max_corr
-                feature_list.append(int(max_index))
+                    tempdata.append((i,newcos,newcov))
+            if tempf==-1:
+                tempdata = sorted(tempdata,key=lambda x:x[1],reverse=True)
+                for i in tempdata:
+                    if i[2]>covnum:
+                        newfeature.append(i[0])
+                        tempfeature.remove(i[0])
+                        flag=1
+                        break
+                if flag==0:
+                    for i in tempdata:
+                        if i[2] == covnum:
+                            newfeature.append(i[0])
+                            tempfeature.remove(i[0])
+                            flag = 1
+                            break
+            else:
+                newfeature.append(tempf)
+                tempfeature.remove(tempf)
+                flag=1
+            if flag!=0:
+                tempdiv = self.divdf(df, newfeature)
+                posnum = self.getpos(tempdiv, divlist)
+                cosnum = self.getcos(tempdiv,divlist)
+                covnum = self.getimport(posnum, divlist)
             else:
                 break
+        tempdiv = self.divdf(df, newfeature)
+        cosnum = self.getcos(tempdiv, divlist)
+        temppos = self.getpos(tempdiv, divlist)
+        covnum = self.getimport(temppos, divlist)
 
-        return feature_list
-        pass
+        return len(newfeature),cosnum,covnum
 
-        
+    def covfs(self,df,featurecol = None,deccol = None):
+        df = df
+        featurecol = featurecol or self.feature_col
+        decisioncol = deccol or self.decision_col
+        divlist = self.divdf(df[decisioncol],decisioncol)
+        newfeature = self.getcore(df,featurecol,divlist=divlist)
+        tempfeature = list(set(featurecol)-set(newfeature))
+        if len(newfeature)==0:
+            covnum=0
+        else:
+            tempdiv = self.divdf(df,newfeature)
+            temppos= self.getpos(tempdiv,divlist)
+            covnum = self.getimport(temppos,divlist)
+        while covnum!=1.0:
+            flag=0
+            tempf = -1
+            if len(tempfeature)!=0:
+                for i in tempfeature:
+                    select_feature = newfeature.copy()
+                    select_feature.append(i)
+                    newdiv = self.divdf(df,select_feature)
+                    newpos = self.getpos(newdiv,divlist)
+                    newcov = self.getimport(newpos,divlist)
+                    if newcov>=covnum:
+                        tempf = i
+                        covnum = newcov
+                        flag = 1
+                if flag!=0:
+                    newfeature.append(tempf)
+                    tempfeature.remove(tempf)
+                    tempdiv = self.divdf(df, newfeature)
+                    posnum = self.getpos(tempdiv, divlist)
+                    covnum = self.getimport(posnum, divlist)
+                else:
+                    break
+            else:
+                break
+        tempdiv = self.divdf(df, newfeature)
+        cosnum = self.getcos(tempdiv, divlist)
+        temppos = self.getpos(tempdiv, divlist)
+        covnum = self.getimport(temppos, divlist)
 
-    
+        return newfeature,len(newfeature),cosnum,covnum
 
-if __name__=='__main__':
-    # data = pd.read_csv('1penguins_raw.csv')
-    # data = data.fillna(-1)
-    #
-    #
-    # def trans(x):
-    #     if x == data['Species'].unique()[0]:
-    #         return 0
-    #     if x == data['Species'].unique()[1]:
-    #         return 1
-    #     if x == data['Species'].unique()[2]:
-    #         return 2
-    #
-    #
-    # data['Species'] = data['Species'].apply(trans)
-    # data_target_part = data[data['Species'].isin([0, 1])][['Species']]
-    # data_features_part = data[data['Species'].isin([0, 1])][['Culmen Length (mm)', 'Culmen Depth (mm)',
-    #                                                          'Flipper Length (mm)', 'Body Mass (g)']]
-    # x_train, x_test, y_train, y_test = train_test_split(
-    #     data_features_part,data_target_part, test_size=0.2, random_state=2020)
-    # A=ARMLNRS(x_train.values,y_train.values,x_test.values,y_test.values,0.01,0)
-    # print('******')
-    # a= A.armlnrs()
-    # print(a)
-    data = pd.read_csv('./断案/0_0.10.csv')
-    data1=data.iloc[:,3:12]
-    data2 = data.iloc[:,12].to_frame()
-    # rough_model = roughset(data1,data2)
-    # rough_model.deal()
-    from sklearn import linear_model
-    data3 = data.iloc[:,2].to_frame()
-    model = linear_model.LinearRegression()
-    model.fit(data3,data2)
-    data4 = model.predict(data3).tolist()
-    data2 = data.iloc[:,12].tolist()
-    data5=[]
-    for i in range(len(data4)):
-        a = int(100*(data4[i][0]-data2[i])/data4[i][0])
-        data5.append(int(a/10))
-    data6 = pd.DataFrame(data5)
-    rough_model1 = roughset(data1,data6)
-    rough_model1.deal()
-    #rough_model1.deal1()
+    def SGFfs(self,df,featurecol = None,deccol = None):
+        df = df
+        featurecol = featurecol or self.feature_col
+        decisioncol = deccol or self.decision_col
+        divlist = self.divdf(df[decisioncol],decisioncol)
+        featurediv = self.divdf(df[featurecol],featurecol)
+        covtarget = self.getICD(featurediv,divlist)
+        newfeature = self.getcore(df,featurecol,divlist=divlist)
+        tempfeature = list(set(featurecol)-set(newfeature))
+        if len(newfeature)==0:
+            covnum=0
+        else:
+            tempdiv = self.divdf(df,newfeature)
+            covnum = self.getICD(tempdiv,divlist)
+        while covnum!=covtarget:
+            flag=0
+            tempf = -1
+            if len(tempfeature)!=0:
+                ICDflag =0
+                for i in tempfeature:
+                    select_feature = newfeature.copy()
+                    select_feature.append(i)
+                    newdiv = self.divdf(df,select_feature)
+                    newcov = self.getICD(newdiv,divlist)-covnum
+                    if newcov>ICDflag:
+                        tempf = i
+                        ICDflag = newcov
+                        flag = 1
+                if flag!=0:
+                    newfeature.append(tempf)
+                    tempfeature.remove(tempf)
+                    tempdiv = self.divdf(df, newfeature)
+                    covnum = self.getICD(tempdiv, divlist)
+                else:
+                    break
+            else:
+                break
+        tempdiv = self.divdf(df, newfeature)
+        cosnum = self.getcos(tempdiv, divlist)
+        temppos = self.getpos(tempdiv, divlist)
+        covnum = self.getimport(temppos, divlist)
+
+        return len(newfeature),cosnum,covnum
+if __name__ == '__main__':
+    # df = pd.read_csv('example.csv')
+    # RS = cosRoughSet(
+    #     data=df,
+    #     feature_col=['天气', '事故情形', '事故原因'],
+    #     decision_col=['损坏部位']
+    # )
+    # print(RS.cosfs(df,['天气', '事故情形', '事故原因'],['损坏部位']))
+    # print(RS.covfs(df,['天气', '事故情形', '事故原因'],['损坏部位']))
+    # data = pd.read_table('./数据/page+blocks+classification/page-blocks.data')
+    # print(data)
+    data = pd.read_csv('./数据/internet+advertisements.csv')
+    print(len(data.columns.tolist()))
+    # RS = cosRoughSet(
+    #     data=data,
+    #     feature_col=list(data.columns[1:len(data.columns.tolist())]),
+    #     decision_col=[data.columns[0]]
+    # )
+    # print(RS.SGFfs(data,list(data.columns[1:len(data.columns.tolist())]),[data.columns[0]]))
+    # print(RS.covfs(data,list(data.columns[1:len(data.columns.tolist())]),[data.columns[0]]))
+    # print(RS.cosfs(data,list(data.columns[1:len(data.columns.tolist())]),[data.columns[0]]))
+    RS = cosRoughSet(
+        data=data,
+        feature_col=list(data.columns[0:-1]),
+        decision_col=[data.columns[-1]]
+    )
+    print(RS.SGFfs(data, list(data.columns[0:-1]), [data.columns[-1]]))
+    print(RS.covfs(data,list(data.columns[0:-1]),[data.columns[-1]]))
+    # print(RS.cosfs(data,list(data.columns[0:-1]),[data.columns[-1]]))
+
+
+
+
+
